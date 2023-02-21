@@ -12,6 +12,7 @@ from pytorch_lightning import seed_everything
 from torch import autocast
 from contextlib import nullcontext
 from imwatermark import WatermarkEncoder
+from safetensors import safe_open
 
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
@@ -24,15 +25,24 @@ def chunk(it, size):
     it = iter(it)
     return iter(lambda: tuple(islice(it, size)), ())
 
-
+def load_safetensors(path: str):
+    tensors = {}
+    with safe_open(path, framework="pt", device="cpu") as f:
+        for key in f.keys():
+            tensors[key] = f.get_tensor(key)
+    return tensors
 def load_model_from_config(config, ckpt, device=torch.device("cuda"), verbose=False):
     print(f"Loading model from {ckpt}")
-    pl_sd = torch.load(ckpt, map_location="cpu")
-    if "global_step" in pl_sd:
-        print(f"Global Step: {pl_sd['global_step']}")
-    sd = pl_sd["state_dict"]
+    if ".safetensors" in ckpt:
+        sd = load_safetensors(ckpt)
+    else:
+        pl_sd = torch.load(ckpt, map_location=device)
+        if "global_step" in pl_sd:
+            print(f"Global Step: {pl_sd['global_step']}")
+        sd = pl_sd["state_dict"]
     model = instantiate_from_config(config.model)
     m, u = model.load_state_dict(sd, strict=False)
+
     if len(m) > 0 and verbose:
         print("missing keys:")
         print(m)
@@ -45,6 +55,9 @@ def load_model_from_config(config, ckpt, device=torch.device("cuda"), verbose=Fa
     elif device == torch.device("cpu"):
         model.cpu()
         model.cond_stage_model.device = "cpu"
+    elif device == torch.device("mps"):
+        model.to(device)
+        model.cond_stage_model.device = "mps"
     else:
         raise ValueError(f"Incorrect device name. Received: {device}")
     model.eval()
@@ -59,6 +72,13 @@ def parse_args():
         nargs="?",
         default="a professional photograph of an astronaut riding a triceratops",
         help="the prompt to render"
+    )
+    parser.add_argument(
+        "--negative_prompt",
+        type=str,
+        nargs="?",
+        default="((low quality))",
+        help="the negative prompt to avoid"
     )
     parser.add_argument(
         "--outdir",
@@ -169,7 +189,7 @@ def parse_args():
         type=str,
         help="evaluate at this precision",
         choices=["full", "autocast"],
-        default="autocast"
+        default="full"
     )
     parser.add_argument(
         "--repeat",
@@ -181,7 +201,7 @@ def parse_args():
         "--device",
         type=str,
         help="Device on which Stable Diffusion will be run",
-        choices=["cpu", "cuda"],
+        choices=["cpu", "cuda", "mps"],
         default="cpu"
     )
     parser.add_argument(
@@ -215,7 +235,11 @@ def main(opt):
     seed_everything(opt.seed)
 
     config = OmegaConf.load(f"{opt.config}")
-    device = torch.device("cuda") if opt.device == "cuda" else torch.device("cpu")
+    device = torch.device("cpu")
+    if opt.device == "cuda":
+        device = torch.device("cuda")
+    elif opt.device == "mps":
+        device = torch.device("mps")
     model = load_model_from_config(config, f"{opt.ckpt}", device)
 
     if opt.plms:
@@ -237,6 +261,7 @@ def main(opt):
     n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
     if not opt.from_file:
         prompt = opt.prompt
+        negative_prompt = opt.negative_prompt
         assert prompt is not None
         data = [batch_size * [prompt]]
 
@@ -310,7 +335,7 @@ def main(opt):
         print("Running a forward pass to initialize optimizations")
         uc = None
         if opt.scale != 1.0:
-            uc = model.get_learned_conditioning(batch_size * [""])
+            uc = model.get_learned_conditioning(batch_size * [negative_prompt])
         if isinstance(prompts, tuple):
             prompts = list(prompts)
 
@@ -332,14 +357,14 @@ def main(opt):
 
     precision_scope = autocast if opt.precision=="autocast" or opt.bf16 else nullcontext
     with torch.no_grad(), \
-        precision_scope(opt.device), \
+        precision_scope(opt.device if opt.device == "cuda" else "cpu"), \
         model.ema_scope():
             all_samples = list()
             for n in trange(opt.n_iter, desc="Sampling"):
                 for prompts in tqdm(data, desc="data"):
                     uc = None
                     if opt.scale != 1.0:
-                        uc = model.get_learned_conditioning(batch_size * [""])
+                        uc = model.get_learned_conditioning(batch_size * [negative_prompt])
                     if isinstance(prompts, tuple):
                         prompts = list(prompts)
                     c = model.get_learned_conditioning(prompts)

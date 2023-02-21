@@ -42,7 +42,7 @@ class ClassEmbedder(nn.Module):
         c = self.embedding(c)
         return c
 
-    def get_unconditional_conditioning(self, bs, device="cuda"):
+    def get_unconditional_conditioning(self, bs, device="mps"):
         uc_class = self.n_classes - 1  # 1000 classes --> 0 ... 999, one extra class for ucg (class 1000)
         uc = torch.ones((bs,), device=device) * uc_class
         uc = {self.key: uc}
@@ -57,10 +57,10 @@ def disabled_train(self, mode=True):
 
 class FrozenT5Embedder(AbstractEncoder):
     """Uses the T5 transformer encoder for text"""
-    def __init__(self, version="google/t5-v1_1-large", device="cuda", max_length=77, freeze=True):  # others are google/t5-v1_1-xl and google/t5-v1_1-xxl
+    def __init__(self, version="google/t5-v1_1-large", device="mps", max_length=77, freeze=True):  # others are google/t5-v1_1-xl and google/t5-v1_1-xxl
         super().__init__()
-        self.tokenizer = T5Tokenizer.from_pretrained(version)
-        self.transformer = T5EncoderModel.from_pretrained(version)
+        self.tokenizer = T5Tokenizer.from_pretrained(version, device=device)
+        self.transformer = T5EncoderModel.from_pretrained(version, device=device)
         self.device = device
         self.max_length = max_length   # TODO: typical value?
         if freeze:
@@ -92,7 +92,7 @@ class FrozenCLIPEmbedder(AbstractEncoder):
         "pooled",
         "hidden"
     ]
-    def __init__(self, version="openai/clip-vit-large-patch14", device="cuda", max_length=77,
+    def __init__(self, version="openai/clip-vit-large-patch14", device="mps", max_length=77,
                  freeze=True, layer="last", layer_idx=None):  # clip-vit-base-patch32
         super().__init__()
         assert layer in self.LAYERS
@@ -140,11 +140,11 @@ class FrozenOpenCLIPEmbedder(AbstractEncoder):
         "last",
         "penultimate"
     ]
-    def __init__(self, arch="ViT-H-14", version="laion2b_s32b_b79k", device="cuda", max_length=77,
+    def __init__(self, arch="ViT-H-14", version="laion2b_s32b_b79k", device="mps", max_length=77,
                  freeze=True, layer="last"):
         super().__init__()
         assert layer in self.LAYERS
-        model, _, _ = open_clip.create_model_and_transforms(arch, device=torch.device('cpu'), pretrained=version)
+        model, _, _ = open_clip.create_model_and_transforms(arch, device=torch.device("mps"), pretrained=version)
         del model.visual
         self.model = model
 
@@ -194,7 +194,7 @@ class FrozenOpenCLIPEmbedder(AbstractEncoder):
 
 
 class FrozenCLIPT5Encoder(AbstractEncoder):
-    def __init__(self, clip_version="openai/clip-vit-large-patch14", t5_version="google/t5-v1_1-xl", device="cuda",
+    def __init__(self, clip_version="openai/clip-vit-large-patch14", t5_version="google/t5-v1_1-xl", device="mps",
                  clip_max_length=77, t5_max_length=77):
         super().__init__()
         self.clip_encoder = FrozenCLIPEmbedder(clip_version, device, max_length=clip_max_length)
